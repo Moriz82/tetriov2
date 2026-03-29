@@ -30,25 +30,11 @@ pub struct VisionState {
     pub queue: Vec<PieceType>,
 }
 
-/// Let user select the board area with slurp
+/// Let user select the board area.
+/// Linux: slurp (Wayland region selector)
+/// macOS: screencapture -i (interactive selection, writes coords to temp file)
 pub fn manual_calibrate() -> Option<Calibration> {
-    let output = std::process::Command::new("slurp")
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-
-    let region = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    let parts: Vec<&str> = region.split_whitespace().collect();
-    if parts.len() != 2 { return None; }
-
-    let pos: Vec<u32> = parts[0].split(',').filter_map(|s| s.parse().ok()).collect();
-    let size: Vec<u32> = parts[1].split('x').filter_map(|s| s.parse().ok()).collect();
-    if pos.len() != 2 || size.len() != 2 { return None; }
-
-    let sel_x = pos[0];
-    let sel_y = pos[1];
-    let sel_w = size[0];
-    let sel_h = size[1];
+    let (sel_x, sel_y, sel_w, sel_h) = platform_select_region()?;
 
     let ratio = sel_w as f64 / sel_h as f64;
     let cell_size = if ratio < 0.7 {
@@ -413,4 +399,77 @@ fn detect_hold_scan(pixels: &[u8], width: u32, cal: &Calibration) -> Option<Piec
     } else {
         None
     }
+}
+
+// ─── Platform-specific region selection ─────────────────────────────
+
+/// Returns (x, y, width, height) of the user's selection.
+#[cfg(target_os = "linux")]
+fn platform_select_region() -> Option<(u32, u32, u32, u32)> {
+    let output = std::process::Command::new("slurp")
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let region = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let parts: Vec<&str> = region.split_whitespace().collect();
+    if parts.len() != 2 { return None; }
+    let pos: Vec<u32> = parts[0].split(',').filter_map(|s| s.parse().ok()).collect();
+    let size: Vec<u32> = parts[1].split('x').filter_map(|s| s.parse().ok()).collect();
+    if pos.len() != 2 || size.len() != 2 { return None; }
+    Some((pos[0], pos[1], size[0], size[1]))
+}
+
+/// macOS: Use screencapture -i to let user drag-select, then read the image dimensions.
+#[cfg(target_os = "macos")]
+fn platform_select_region() -> Option<(u32, u32, u32, u32)> {
+    eprintln!("[Cal] Drag to select the board area...");
+    // screencapture -i captures a selection and saves to file
+    // -J selection outputs JSON with selection rect on newer macOS
+    // Fallback: capture to temp file, read dimensions, ask user for position
+    let tmp = "/tmp/tetrio-bot-calibrate.png";
+    let status = std::process::Command::new("screencapture")
+        .args(["-i", "-x", tmp])
+        .status()
+        .ok()?;
+    if !status.success() { return None; }
+
+    // Get image dimensions via sips
+    let output = std::process::Command::new("sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight", tmp])
+        .output()
+        .ok()?;
+    let sips_out = String::from_utf8_lossy(&output.stdout);
+    let mut w = 0u32;
+    let mut h = 0u32;
+    for line in sips_out.lines() {
+        let line = line.trim();
+        if line.starts_with("pixelWidth:") {
+            w = line.split(':').nth(1)?.trim().parse().ok()?;
+        } else if line.starts_with("pixelHeight:") {
+            h = line.split(':').nth(1)?.trim().parse().ok()?;
+        }
+    }
+    if w == 0 || h == 0 { return None; }
+
+    // screencapture -i doesn't tell us the position, so we need to find it.
+    // Use the mouse position at capture start as an approximation.
+    // For a more robust approach, we capture the full screen and diff.
+    // Simple approach: ask the system for the mouse location via cliclick or python
+    let pos_output = std::process::Command::new("python3")
+        .args(["-c", "from Quartz import NSEvent; p = NSEvent.mouseLocation(); from AppKit import NSScreen; h = NSScreen.mainScreen().frame().size.height; print(f'{int(p.x)},{int(h - p.y)}')"])
+        .output()
+        .ok()?;
+    let pos_str = String::from_utf8_lossy(&pos_output.stdout).trim().to_string();
+    let coords: Vec<u32> = pos_str.split(',').filter_map(|s| s.parse().ok()).collect();
+
+    // The selection's top-left is approximately at (mouse_x - w, mouse_y - h)
+    // since the user drags from top-left to bottom-right and releases at bottom-right.
+    // This is imprecise; the user may need to re-select if off.
+    let (mx, my) = if coords.len() == 2 { (coords[0], coords[1]) } else { (0, 0) };
+    let sel_x = mx.saturating_sub(w);
+    let sel_y = my.saturating_sub(h);
+
+    eprintln!("[Cal] Detected selection: {}x{} at ({},{})", w, h, sel_x, sel_y);
+    eprintln!("[Cal] If position looks wrong, try selecting from top-left to bottom-right.");
+    Some((sel_x, sel_y, w, h))
 }

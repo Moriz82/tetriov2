@@ -5,4 +5,10 @@ edition.workspace = true
 
 [dependencies]
 tetrio-engine = { path = "../engine" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"

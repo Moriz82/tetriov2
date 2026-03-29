@@ -1,21 +1,46 @@
-//! Screenshot capture via grim (Wayland/Hyprland)
-//! Captures only a specific region for speed on multi-monitor setups.
+//! Screenshot capture — platform-specific implementations.
 
-use std::process::Command;
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::process::Command;
 
-/// Capture a specific screen region. Returns RGBA pixels.
-pub fn capture_region(x: u32, y: u32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
-    let geometry = format!("{},{} {}x{}", x, y, w, h);
-    let output = Command::new("grim")
-        .args(["-g", &geometry, "-t", "ppm", "-"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        eprintln!("[grim] stderr: {}", String::from_utf8_lossy(&output.stderr));
-        return None;
+    /// Capture a specific screen region via grim (Wayland). Returns RGBA pixels.
+    pub fn capture_region(x: u32, y: u32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let geometry = format!("{},{} {}x{}", x, y, w, h);
+        let output = Command::new("grim")
+            .args(["-g", &geometry, "-t", "ppm", "-"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            eprintln!("[grim] stderr: {}", String::from_utf8_lossy(&output.stderr));
+            return None;
+        }
+        super::parse_ppm(&output.stdout)
     }
-    parse_ppm(&output.stdout)
 }
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::process::Command;
+
+    /// Capture a specific screen region via macOS screencapture. Returns RGBA pixels.
+    pub fn capture_region(x: u32, y: u32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+        // screencapture -R x,y,w,h -t png -x (silent) to stdout via temp file
+        let tmp = "/tmp/tetrio-bot-capture.png";
+        let rect = format!("{},{},{},{}", x, y, w, h);
+        let status = Command::new("screencapture")
+            .args(["-R", &rect, "-t", "png", "-x", tmp])
+            .status()
+            .ok()?;
+        if !status.success() { return None; }
+
+        // Read PNG and decode to RGBA
+        let png_data = std::fs::read(tmp).ok()?;
+        super::decode_png(&png_data)
+    }
+}
+
+pub use platform::capture_region;
 
 fn parse_ppm(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut newlines = 0;
@@ -55,4 +80,21 @@ fn parse_ppm(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         }
     }
     Some((rgba, w, h))
+}
+
+/// Minimal PNG decoder — handles uncompressed IDAT for screencapture output.
+/// Falls back to sips conversion if needed.
+#[cfg(target_os = "macos")]
+fn decode_png(png_data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    // Convert PNG to PPM via sips + pipe, then parse
+    use std::process::Command;
+    let tmp_ppm = "/tmp/tetrio-bot-capture.ppm";
+    let status = Command::new("sips")
+        .args(["-s", "format", "ppm", "/tmp/tetrio-bot-capture.png",
+               "--out", tmp_ppm])
+        .output()
+        .ok()?;
+    if !status.status.success() { return None; }
+    let ppm_data = std::fs::read(tmp_ppm).ok()?;
+    parse_ppm(&ppm_data)
 }

@@ -1,0 +1,8 @@
+[package]
+name = "tetrio-bot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tetrio-engine = { path = "../engine" }
+libc = "0.2"

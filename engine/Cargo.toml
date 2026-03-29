@@ -1,0 +1,6 @@
+[package]
+name = "tetrio-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
